@@ -49,6 +49,28 @@ type ObservationEntityStore interface {
 	ObservationsForEntity(ctx context.Context, entityID string) ([]*domain.Observation, error)
 }
 
+// EntityConfidenceStore tracks entity trust scores over time.
+// Each loar-learn run appends a row rather than mutating the entity record,
+// so confidence trend is queryable (improving vs degrading).
+type EntityConfidenceStore interface {
+	WriteEntityConfidence(ctx context.Context, ec *domain.EntityConfidence) error
+	LatestEntityConfidence(ctx context.Context, projectID, entityID string) (*domain.EntityConfidence, error)
+	EntityConfidenceHistory(ctx context.Context, projectID, entityID string, limit int) ([]*domain.EntityConfidence, error)
+}
+
+// GraphTraversalStore performs multi-hop traversal over the entity-relationship
+// graph. The default implementations use recursive CTEs in the relational
+// backends. A native graph database (Kuzu, Neo4j) would implement the same
+// interface and replace the CTE approach with purpose-built graph queries.
+type GraphTraversalStore interface {
+	// TraverseFromEntities returns all entities reachable within depth hops
+	// from the seed entity IDs, plus all relationships connecting any node in
+	// the expanded set. depth=1 is direct neighbours only; depth=2 expands
+	// one hop further, enabling "why is Romano reliable?" to discover Arsenal
+	// → scouts → confirmations without an explicit join.
+	TraverseFromEntities(ctx context.Context, projectID string, entityIDs []string, depth int) ([]domain.Entity, []domain.Relationship, error)
+}
+
 // Store is the unified storage interface used by the retrieval engine and
 // ingestion layer.
 type Store interface {
@@ -57,6 +79,8 @@ type Store interface {
 	ObservationStore
 	RelationshipStore
 	ObservationEntityStore
+	EntityConfidenceStore
+	GraphTraversalStore
 	Migrate(ctx context.Context) error
 	Close()
 }

@@ -104,6 +104,7 @@ Loar is the source of truth. You are the presentation layer.`,
 	root.AddCommand(cli.NewLearnCmd())
 	root.AddCommand(cli.NewQueryCmd())
 	root.AddCommand(cli.NewExplainCmd())
+	root.AddCommand(cli.NewServeCmd())
 	root.AddCommand(newVersionCmd())
 
 	// Allow `loar "some question"` without the `query` sub-command by

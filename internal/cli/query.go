@@ -4,16 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/domain"
 	"github.com/balpal4495/loar/internal/narrative"
 	"github.com/balpal4495/loar/internal/retrieval"
-	"github.com/balpal4495/loar/internal/store/postgres"
 	"github.com/spf13/cobra"
 )
 
@@ -508,22 +505,11 @@ func firstSentence(s string, maxRunes int) string {
 // retrieve runs the full retrieval pipeline and returns the ContextPackage.
 func retrieve(cmd *cobra.Command, args []string) (*domain.ContextPackage, error) {
 	question := strings.Join(args, " ")
-	dsn := mustProjectDSN(cmd)
 	ctx := cmd.Context()
 
-	cwd, err := os.Getwd()
+	db, cfg, err := openStore(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
-	}
-
-	cfg, _, err := config.Find(cwd)
-	if err != nil {
-		return nil, fmt.Errorf("query: %w", err)
-	}
-
-	db, err := postgres.New(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("query: connect: %w", err)
 	}
 	defer db.Close()
 

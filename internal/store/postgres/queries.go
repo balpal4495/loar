@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -293,6 +295,7 @@ func (db *DB) CreateRelationship(ctx context.Context, projectID string, r *domai
                  (id, project_id, source_id, target_id, relationship_type, confidence)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (project_id, source_id, target_id, relationship_type) DO NOTHING`,
+		r.ID, projectID, r.SourceID, r.TargetID, r.Type, r.Confidence,
 	)
 	return err
 }
@@ -458,4 +461,186 @@ func scanObservation(row rowScanner) (*domain.Observation, error) {
 
 func scanObservationRows(row rowScanner) (*domain.Observation, error) {
 	return scanObservation(row)
+}
+
+// --- entity_confidence ---
+
+// WriteEntityConfidence inserts a new confidence snapshot for an entity.
+// Rows are never updated — the time-series is append-only so trend is queryable.
+func (db *DB) WriteEntityConfidence(ctx context.Context, ec *domain.EntityConfidence) error {
+	if ec.ID == "" {
+		ec.ID = uuid.NewString()
+	}
+	if ec.ComputedAt.IsZero() {
+		ec.ComputedAt = time.Now()
+	}
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO entity_confidence
+		 (id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		ec.ID, ec.EntityID, ec.ProjectID, ec.Score,
+		ec.ObservationCount, ec.ResolvedCount, ec.AccuracyRate, ec.ComputedAt,
+	)
+	return err
+}
+
+// LatestEntityConfidence returns the most recent confidence snapshot for an entity.
+func (db *DB) LatestEntityConfidence(ctx context.Context, projectID, entityID string) (*domain.EntityConfidence, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at
+		 FROM entity_confidence
+		 WHERE project_id = $1 AND entity_id = $2
+		 ORDER BY computed_at DESC LIMIT 1`,
+		projectID, entityID,
+	)
+	return scanEntityConfidence(row)
+}
+
+// EntityConfidenceHistory returns confidence snapshots for an entity in
+// reverse chronological order, capped at limit rows.
+func (db *DB) EntityConfidenceHistory(ctx context.Context, projectID, entityID string, limit int) ([]*domain.EntityConfidence, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at
+		 FROM entity_confidence
+		 WHERE project_id = $1 AND entity_id = $2
+		 ORDER BY computed_at DESC LIMIT $3`,
+		projectID, entityID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*domain.EntityConfidence
+	for rows.Next() {
+		ec, err := scanEntityConfidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, ec)
+	}
+	return results, rows.Err()
+}
+
+func scanEntityConfidence(row rowScanner) (*domain.EntityConfidence, error) {
+	var ec domain.EntityConfidence
+	var computedAt time.Time
+	if err := row.Scan(
+		&ec.ID, &ec.EntityID, &ec.ProjectID, &ec.Score,
+		&ec.ObservationCount, &ec.ResolvedCount, &ec.AccuracyRate, &computedAt,
+	); err != nil {
+		return nil, err
+	}
+	ec.ComputedAt = computedAt
+	return &ec, nil
+}
+
+// --- graph traversal ---
+
+// TraverseFromEntities expands the seed entity IDs up to depth hops through
+// the relationship graph using a cycle-safe recursive CTE. Returns expanded
+// entities (depth > 0) and all relationships in the induced subgraph.
+//
+// This is the Postgres implementation. A Kuzu GraphBackend would implement the
+// same interface using Cypher:
+//
+//	MATCH (seed:Entity)-[*1..depth]-(n:Entity)
+//	WHERE seed.id IN $seedIDs RETURN n
+func (db *DB) TraverseFromEntities(ctx context.Context, projectID string, entityIDs []string, depth int) ([]domain.Entity, []domain.Relationship, error) {
+	if len(entityIDs) == 0 || depth == 0 {
+		return nil, nil, nil
+	}
+
+	// Recursive CTE with cycle prevention via path array.
+	// The path tracks visited entity IDs so we never revisit a node.
+	rows, err := db.pool.Query(ctx,
+		`WITH RECURSIVE traversal(entity_id, depth, path) AS (
+		     SELECT e.id, 0, ARRAY[e.id]
+		     FROM entities e
+		     WHERE e.id = ANY($3::text[]) AND e.project_id = $1
+		     UNION ALL
+		     SELECT
+		         CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END,
+		         t.depth + 1,
+		         t.path || CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END
+		     FROM relationships r
+		     JOIN traversal t ON (r.source_id = t.entity_id OR r.target_id = t.entity_id)
+		     WHERE r.project_id = $1
+		       AND t.depth < $2
+		       AND NOT (CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END = ANY(t.path))
+		 )
+		 SELECT DISTINCT e.id, e.type, e.canonical_name, e.aliases, e.metadata
+		 FROM entities e
+		 JOIN (SELECT DISTINCT entity_id FROM traversal WHERE depth > 0) trav ON e.id = trav.entity_id
+		 WHERE e.project_id = $1`,
+		projectID, depth, entityIDs,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("traverse entities: %w", err)
+	}
+	defer rows.Close()
+
+	var expanded []domain.Entity
+	expandedIDs := make([]string, 0)
+	for rows.Next() {
+		e, err := scanEntityRow(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		expanded = append(expanded, *e)
+		expandedIDs = append(expandedIDs, e.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	// Collect all relationships in the induced subgraph (seeds ∪ expanded).
+	allIDs := append(entityIDs, expandedIDs...)
+	relRows, err := db.pool.Query(ctx,
+		`SELECT id, source_id, target_id, relationship_type, confidence
+		 FROM relationships
+		 WHERE project_id = $1
+		   AND source_id = ANY($2::text[])
+		   AND target_id = ANY($2::text[])`,
+		projectID, allIDs,
+	)
+	if err != nil {
+		return expanded, nil, fmt.Errorf("traverse relationships: %w", err)
+	}
+	defer relRows.Close()
+
+	var rels []domain.Relationship
+	for relRows.Next() {
+		var r domain.Relationship
+		if err := relRows.Scan(&r.ID, &r.SourceID, &r.TargetID, &r.Type, &r.Confidence); err != nil {
+			return expanded, nil, err
+		}
+		rels = append(rels, r)
+	}
+	return expanded, rels, relRows.Err()
+}
+
+// confidenceDecay computes recency-weighted confidence for a set of observations.
+// Shared by the Postgres learn path; mirrors retrieval/engine.go recencyScore.
+func confidenceDecay(obs []*domain.Observation, now time.Time) float64 {
+	if len(obs) == 0 {
+		return 0.5
+	}
+	total := 0.0
+	for _, o := range obs {
+		ref := o.Temporal.OccurredAt
+		if ref == nil {
+			ref = o.Temporal.ObservedAt
+		}
+		if ref == nil {
+			total += 0.5
+			continue
+		}
+		days := now.Sub(*ref).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		total += 0.5 + 0.5*math.Exp(-days/365)
+	}
+	return total / float64(len(obs))
 }

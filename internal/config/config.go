@@ -20,6 +20,9 @@ const (
 type ProjectConfig struct {
 	Project     string `toml:"project"`
 	DatabaseURL string `toml:"database_url,omitempty"`
+	// Backend selects the storage engine: "postgres" (default) or "local" (SQLite).
+	// "local" mode requires no Docker — the DB lives at database_url as a file path.
+	Backend string `toml:"backend,omitempty"`
 }
 
 // configPath returns the absolute path to the project.toml file starting

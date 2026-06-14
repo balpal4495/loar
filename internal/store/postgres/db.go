@@ -83,6 +83,20 @@ func (db *DB) Migrate(ctx context.Context) error {
 		// Unique constraint on relationships so co_occurs links are idempotent.
 		`CREATE UNIQUE INDEX IF NOT EXISTS relationships_unique
 		 ON relationships (project_id, source_id, target_id, relationship_type)`,
+		// Entity confidence time-series — one row per entity per learn run.
+		// Never mutated; trend is queryable by ordering on computed_at.
+		`CREATE TABLE IF NOT EXISTS entity_confidence (
+			id                TEXT PRIMARY KEY,
+			entity_id         TEXT NOT NULL REFERENCES entities(id),
+			project_id        TEXT NOT NULL REFERENCES projects(id),
+			score             DOUBLE PRECISION NOT NULL,
+			observation_count INTEGER NOT NULL DEFAULT 0,
+			resolved_count    INTEGER NOT NULL DEFAULT 0,
+			accuracy_rate     DOUBLE PRECISION,
+			computed_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS entity_confidence_entity_time
+		 ON entity_confidence (entity_id, computed_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.pool.Exec(ctx, s); err != nil {
@@ -104,6 +118,7 @@ func (db *DB) CleanProject(ctx context.Context) error {
 
 	for _, stmt := range []string{
 		`DELETE FROM observation_entities`,
+		`DELETE FROM entity_confidence`,
 		`DELETE FROM relationships`,
 		`DELETE FROM observations`,
 		`DELETE FROM entities`,
