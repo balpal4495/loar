@@ -7,7 +7,8 @@
 //	loar ingest [file|url|-]         Ingest data into the current project
 //	loar learn                       Extract and link entities from stored observations
 //	loar query <question>            Query the knowledge store
-//	loar explain <question>          Produce a human-readable explanation
+//	loar explain <question>          Produce a JSON context package (primary AI interface)
+//	loar serve                       Start MCP server for agent integrations
 //	loar "<question>"                Shorthand for loar query <question>
 package main
 
@@ -50,37 +51,46 @@ preserves relationships, and retrieves evidence to support decision making.
   loar learn              Extract and link entities from stored observations
   loar "<question>"       Query the knowledge store in plain English
   loar project clean      Wipe observations and re-ingest from scratch
+  loar serve              Start MCP server for agent integrations (stdio)
 
-── For AI agents (Copilot, Claude Code, etc.) ────────────────────────────
-If you are an AI assistant reading this, here is how to use Loar:
+── For AI agents (Copilot, Claude Code, Cursor, etc.) ───────────────────
+If you are an AI assistant reading this output, here is the correct workflow:
 
-1. RETRIEVE context before answering any question about the project:
-     loar explain "<question>"
-   This returns a JSON context package containing observations, entities,
-   contradictions, and a date range. Use this as your primary evidence source.
+SETUP (once per project directory):
+  1. loar project use [name]      -- creates .loar/project.toml
+  2. loar ingest <path>           -- ingest the project's knowledge files
+  3. loar learn                   -- extract entities and build relationship graph
 
-2. SYNTHESIZE the JSON into a clear answer for the user. Loar does not
-   generate prose — that is your job. Structure your answer around the
-   observations returned, respecting their temporal order (oldest first).
+RETRIEVE before answering ANY question about the project:
+  loar explain "<question>"
+  Returns a JSON context package. Parse it. Use it as your primary evidence
+  source. Do NOT answer from training data when Loar has relevant observations.
 
-3. SURFACE contradictions when present. If the context package contains
-   contradictions, flag them explicitly rather than silently picking one side.
+WORKFLOW RULES:
+  - Always call "loar explain" before answering questions about this project.
+  - The "observations" array is full-text -- read every entry, do not truncate.
+  - Respect "occurred_at" ordering. Newer observations supersede older ones.
+  - When "contradictions" is non-empty, surface them explicitly to the user.
+    Do not silently pick one side.
+  - "confidence" near 1.0 means strong recency and coverage. Near 0.5 means
+    sparse or old data -- tell the user.
+  - After the user provides new decisions or facts, ingest them:
+      echo '{"content":"...","occurred_at":"..."}' | loar ingest -
+  - After bulk ingests, run "loar learn" to rebuild the entity graph.
 
-4. INGEST new knowledge when the user provides information worth preserving:
-     echo '<json>' | loar ingest -
-   or
-     loar ingest <file>
-
-5. LEARN after bulk ingests to extract entity links:
-     loar learn
-
-The context package schema:
+CONTEXT PACKAGE SCHEMA:
   query          string
-  entities       [{name, type}]
-  observations   [{content, occurred_at, source_id}]   -- full text, no truncation
+  summary        string
+  entities       [{id, type, canonical_name}]
+  observations   [{content, occurred_at, source_id}]
+  relationships  [{source_id, target_id, type, confidence}]
   contradictions [{summary}]
-  confidence     float (0–1)
+  confidence     float  (0.5 = neutral/sparse, 1.0 = high recency + coverage)
   date_range     {earliest, latest}
+
+MCP SERVER (for agent tool integrations):
+  loar serve      Starts a stdio MCP server. Register in your editor's MCP
+                  config to give agents direct tool access without the CLI.
 
 Loar is the source of truth. You are the presentation layer.`,
 		// When called with a single argument that is not a known sub-command,
