@@ -31,8 +31,8 @@ function plural(n, singular, plur) {
 function render(pkg) {
   const { query, entities, observations, contradictions, date_range } = pkg;
   const lines = [];
-  const entityNames = (entities || []).map(e => e.name);
-  const heading = entityNames.length > 0 ? entityNames.join(', ') : query;
+  const entityNames = (entities || []).map(e => e.canonical_name || e.name).filter(Boolean);
+  const heading = query;
 
   lines.push(heading);
   lines.push('─'.repeat(40));
