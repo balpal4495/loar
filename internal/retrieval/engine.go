@@ -172,10 +172,7 @@ func computeConfidence(obs []domain.Observation) float64 {
 func buildEvidence(obs []domain.Observation) []domain.Evidence {
 	ev := make([]domain.Evidence, 0, len(obs))
 	for _, o := range obs {
-		summary := o.Content
-		if len(summary) > 120 {
-			summary = summary[:120] + "…"
-		}
+		summary := truncate(o.Content, 120)
 		ev = append(ev, domain.Evidence{
 			ObservationID: o.ID,
 			Summary:       summary,
@@ -202,7 +199,7 @@ func findContradictions(obs []domain.Observation) []domain.Contradiction {
 	var contradictions []domain.Contradiction
 	for _, n := range negative {
 		for _, p := range positive {
-			// Only flag when both observations share a common key word (>5 chars).
+		// Only flag when both observations share a common keyword (>5 chars).
 			if shareKeyword(n.Content, p.Content) {
 				contradictions = append(contradictions, domain.Contradiction{
 					ObservationAID: p.ID,
@@ -240,10 +237,7 @@ func buildTimeline(obs []domain.Observation) []domain.TimelineEvent {
 		if o.Temporal.OccurredAt == nil && o.Temporal.ObservedAt == nil {
 			continue
 		}
-		summary := o.Content
-		if len(summary) > 80 {
-			summary = summary[:80] + "…"
-		}
+		summary := truncate(o.Content, 80)
 		events = append(events, domain.TimelineEvent{
 			Temporal: o.Temporal,
 			Summary:  summary,
@@ -268,4 +262,15 @@ func buildSummary(intent Intent, query string, entities []domain.Entity, obs []d
 		sb.WriteString("No evidence found for this query.")
 	}
 	return sb.String()
+}
+
+// truncate shortens s to at most maxRunes Unicode code points, appending "…"
+// when truncation occurs. Using rune conversion ensures multi-byte UTF-8
+// characters are not split.
+func truncate(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…"
 }

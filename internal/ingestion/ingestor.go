@@ -44,7 +44,11 @@ func (ing *Ingestor) IngestFile(ctx context.Context, path string) (int, error) {
 
 // IngestURL downloads content from the given URL and ingests it.
 func (ing *Ingestor) IngestURL(ctx context.Context, rawURL string) (int, error) {
-	resp, err := http.Get(rawURL) //nolint:noctx // intentional: URL ingestion follows spec
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("ingestion: build request %q: %w", rawURL, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("ingestion: fetch %q: %w", rawURL, err)
 	}

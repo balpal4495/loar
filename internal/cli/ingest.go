@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/ingestion"
@@ -75,5 +76,5 @@ Examples:
 
 // isURL returns true when s starts with http:// or https://.
 func isURL(s string) bool {
-	return len(s) > 7 && (s[:7] == "http://" || s[:8] == "https://")
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
