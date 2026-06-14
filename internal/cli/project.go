@@ -8,7 +8,6 @@ import (
 	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/domain"
 	"github.com/balpal4495/loar/internal/store/postgres"
-	sqstore "github.com/balpal4495/loar/internal/store/sqlite"
 	"github.com/spf13/cobra"
 )
 
@@ -35,8 +34,7 @@ func newProjectUseCmd() *cobra.Command {
 
 If no name is given, the current directory name is used.
 
-In Postgres mode: creates a dedicated loar-<name> database.
-In local mode (after loar setup --local): creates .loar/loar.db (SQLite).
+Creates a dedicated loar-<name> Postgres database and writes .loar/project.toml.
 
 Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 		Args: cobra.MaximumNArgs(1),
@@ -57,50 +55,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 			}
 
 			ctx := cmd.Context()
-
-			// Local (SQLite) mode — no Postgres needed.
-			if gcfg.Backend == "local" {
-				loarDir := filepath.Join(cwd, ".loar")
-				if err := os.MkdirAll(loarDir, 0o755); err != nil {
-					return fmt.Errorf("project use: create .loar dir: %w", err)
-				}
-				dbPath := filepath.Join(loarDir, "loar.db")
-				fmt.Fprintf(cmd.OutOrStdout(), "Initialising local database at %s... ", dbPath)
-				db, err := sqstore.New(dbPath)
-				if err != nil {
-					fmt.Fprintln(cmd.OutOrStdout(), "✗")
-					return fmt.Errorf("project use: %w", err)
-				}
-				defer db.Close()
-				if err := db.Migrate(ctx); err != nil {
-					fmt.Fprintln(cmd.OutOrStdout(), "✗")
-					return fmt.Errorf("project use: migrate: %w", err)
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), "✓")
-
-				proj, err := db.GetProjectByName(ctx, name)
-				if err != nil {
-					proj = &domain.Project{Name: name}
-					if err := db.CreateProject(ctx, proj); err != nil {
-						return fmt.Errorf("project use: create project record: %w", err)
-					}
-				}
-				_ = proj
-
-				if err := config.Write(cwd, &config.ProjectConfig{
-					Project:     name,
-					Backend:     "local",
-					DatabaseURL: dbPath,
-				}); err != nil {
-					return fmt.Errorf("project use: write config: %w", err)
-				}
-
-				fmt.Fprintf(cmd.OutOrStdout(), "Project set to %q (local mode)\n", name)
-				fmt.Fprintln(cmd.OutOrStdout(), "Created .loar/project.toml")
-				return nil
-			}
-
-			// Postgres mode.
 			dbName := "loar-" + name
 			fmt.Fprintf(cmd.OutOrStdout(), "Creating database %q... ", dbName)
 			if err := postgres.CreateDatabase(ctx, gcfg.AdminDSN(), dbName, gcfg.PostgresUser); err != nil {
@@ -131,7 +85,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 
 			if err := config.Write(cwd, &config.ProjectConfig{
 				Project:     name,
-				Backend:     "postgres",
 				DatabaseURL: projectDSN,
 			}); err != nil {
 				return fmt.Errorf("project use: write config: %w", err)
@@ -176,31 +129,18 @@ Use --force to skip the confirmation prompt.`,
 				}
 			}
 
-			// CleanProject is on the concrete types (Postgres and SQLite) but not on
-			// store.Store (it's an admin operation, not a query operation).
-			// Open the concrete backend directly.
-			if cfg.Backend == "local" {
-				sqDB, err := sqstore.New(cfg.DatabaseURL)
-				if err != nil {
-					return fmt.Errorf("project clean: %w", err)
-				}
-				defer sqDB.Close()
-				if err := sqDB.CleanProject(ctx); err != nil {
-					return fmt.Errorf("project clean: %w", err)
-				}
-			} else {
-				dsn := cfg.DatabaseURL
-				if envDSN := os.Getenv("LOAR_DATABASE_URL"); envDSN != "" {
-					dsn = envDSN
-				}
-				pgDB, err := postgres.New(ctx, dsn)
-				if err != nil {
-					return fmt.Errorf("project clean: connect: %w", err)
-				}
-				defer pgDB.Close()
-				if err := pgDB.CleanProject(ctx); err != nil {
-					return fmt.Errorf("project clean: %w", err)
-				}
+			// CleanProject is on the concrete postgres.DB type.
+			dsn := cfg.DatabaseURL
+			if envDSN := os.Getenv("LOAR_DATABASE_URL"); envDSN != "" {
+				dsn = envDSN
+			}
+			pgDB, err := postgres.New(ctx, dsn)
+			if err != nil {
+				return fmt.Errorf("project clean: connect: %w", err)
+			}
+			defer pgDB.Close()
+			if err := pgDB.CleanProject(ctx); err != nil {
+				return fmt.Errorf("project clean: %w", err)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Project %q cleaned. Re-run \"loar ingest\" to repopulate.\n", cfg.Project)
@@ -221,12 +161,6 @@ func newProjectListCmd() *cobra.Command {
 			gcfg, err := mustGlobalConfig(cmd)
 			if err != nil {
 				return err
-			}
-
-			if gcfg.Backend == "local" {
-				fmt.Fprintln(cmd.OutOrStdout(), "Local mode: projects are per-directory (.loar/loar.db).")
-				fmt.Fprintln(cmd.OutOrStdout(), "No global project registry in local mode.")
-				return nil
 			}
 
 			ctx := cmd.Context()
@@ -253,7 +187,6 @@ func newProjectDeleteCmd() *cobra.Command {
 		Use:   "delete <name>",
 		Short: "Delete a project and its database",
 		Long: `Drops the loar-<name> Postgres database and removes .loar/project.toml.
-In local mode, remove .loar/loar.db manually.
 
 This is irreversible.`,
 		Args: cobra.ExactArgs(1),
@@ -263,11 +196,6 @@ This is irreversible.`,
 			gcfg, err := mustGlobalConfig(cmd)
 			if err != nil {
 				return err
-			}
-
-			if gcfg.Backend == "local" {
-				fmt.Fprintln(cmd.OutOrStdout(), "Local mode: delete the .loar/loar.db file manually.")
-				return nil
 			}
 
 			ctx := cmd.Context()

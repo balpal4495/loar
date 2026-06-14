@@ -81,7 +81,20 @@ func (db *DB) CreateEntity(ctx context.Context, projectID string, e *domain.Enti
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		e.ID, projectID, e.Type, e.CanonicalName, e.Aliases, meta,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Mirror the entity into the Apache AGE property graph so it is
+	// immediately available for Cypher traversal.
+	params := fmt.Sprintf(`{"id": %q, "project_id": %q, "canonical_name": %q, "type": %q}`,
+		e.ID, projectID, e.CanonicalName, e.Type)
+	_, _ = db.pool.Exec(ctx,
+		`SELECT * FROM cypher('loar_graph', $$
+		   MERGE (n:Entity {id: $id})
+		   ON CREATE SET n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
+		   ON MATCH SET  n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
+		 $$, $1::agtype) AS (v agtype)`, params)
+	return nil
 }
 
 // GetEntity retrieves an entity by ID.
@@ -297,7 +310,22 @@ func (db *DB) CreateRelationship(ctx context.Context, projectID string, r *domai
                  ON CONFLICT (project_id, source_id, target_id, relationship_type) DO NOTHING`,
 		r.ID, projectID, r.SourceID, r.TargetID, r.Type, r.Confidence,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Mirror the edge into the Apache AGE property graph.
+	// MATCH on Entity nodes that were written by CreateEntity; if either
+	// endpoint is missing the Cypher is a no-op (returns 0 rows, no error).
+	params := fmt.Sprintf(`{"id": %q, "source_id": %q, "target_id": %q, "rel_type": %q, "confidence": %v}`,
+		r.ID, r.SourceID, r.TargetID, r.Type, r.Confidence)
+	_, _ = db.pool.Exec(ctx,
+		`SELECT * FROM cypher('loar_graph', $$
+		   MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
+		   MERGE (a)-[r:RELATED {id: $id}]->(b)
+		   ON CREATE SET r.type = $rel_type, r.confidence = $confidence
+		   ON MATCH SET  r.confidence = $confidence
+		 $$, $1::agtype) AS (v agtype)`, params)
+	return nil
 }
 
 // ListRelationships returns all relationships for a project.
@@ -537,60 +565,83 @@ func scanEntityConfidence(row rowScanner) (*domain.EntityConfidence, error) {
 
 // --- graph traversal ---
 
-// TraverseFromEntities expands the seed entity IDs up to depth hops through
-// the relationship graph using a cycle-safe recursive CTE. Returns expanded
-// entities (depth > 0) and all relationships in the induced subgraph.
+// TraverseFromEntities expands seed entity IDs up to depth hops using
+// Apache AGE Cypher on the loar_graph property graph. The Cypher MATCH
+// traversal is more expressive than a recursive CTE and handles arbitrary
+// relationship types natively.
 //
-// This is the Postgres implementation. A Kuzu GraphBackend would implement the
-// same interface using Cypher:
-//
-//	MATCH (seed:Entity)-[*1..depth]-(n:Entity)
-//	WHERE seed.id IN $seedIDs RETURN n
+// Returned entities are the expanded neighbours (depth > 0). The full entity
+// records are fetched from the relational store after the graph query so
+// callers get rich domain objects, not raw agtype values.
 func (db *DB) TraverseFromEntities(ctx context.Context, projectID string, entityIDs []string, depth int) ([]domain.Entity, []domain.Relationship, error) {
 	if len(entityIDs) == 0 || depth == 0 {
 		return nil, nil, nil
 	}
 
-	// Recursive CTE with cycle prevention via path array.
-	// The path tracks visited entity IDs so we never revisit a node.
-	rows, err := db.pool.Query(ctx,
-		`WITH RECURSIVE traversal(entity_id, depth, path) AS (
-		     SELECT e.id, 0, ARRAY[e.id]
-		     FROM entities e
-		     WHERE e.id = ANY($3::text[]) AND e.project_id = $1
-		     UNION ALL
-		     SELECT
-		         CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END,
-		         t.depth + 1,
-		         t.path || CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END
-		     FROM relationships r
-		     JOIN traversal t ON (r.source_id = t.entity_id OR r.target_id = t.entity_id)
-		     WHERE r.project_id = $1
-		       AND t.depth < $2
-		       AND NOT (CASE WHEN r.source_id = t.entity_id THEN r.target_id ELSE r.source_id END = ANY(t.path))
-		 )
-		 SELECT DISTINCT e.id, e.type, e.canonical_name, e.aliases, e.metadata
-		 FROM entities e
-		 JOIN (SELECT DISTINCT entity_id FROM traversal WHERE depth > 0) trav ON e.id = trav.entity_id
-		 WHERE e.project_id = $1`,
-		projectID, depth, entityIDs,
-	)
+	// Build the agtype params. seed_ids is a Cypher list of quoted strings.
+	quoted := make([]string, len(entityIDs))
+	for i, id := range entityIDs {
+		quoted[i] = fmt.Sprintf("%q", id)
+	}
+	params := fmt.Sprintf(`{"project_id": %q, "seed_ids": [%s]}`,
+		projectID, strings.Join(quoted, ", "))
+
+	// Use UNWIND to iterate seed IDs and perform a variable-length path match.
+	// depth is an integer Go variable — fmt.Sprintf is safe here.
+	sql := fmt.Sprintf(`
+		SELECT * FROM cypher('loar_graph', $$
+		    UNWIND $seed_ids AS seed_id
+		    MATCH (seed:Entity {id: seed_id, project_id: $project_id})-[*1..%d]-(n:Entity {project_id: $project_id})
+		    RETURN DISTINCT n.id
+		$$, $1::agtype) AS (entity_id agtype)`, depth)
+
+	rows, err := db.pool.Query(ctx, sql, params)
 	if err != nil {
-		return nil, nil, fmt.Errorf("traverse entities: %w", err)
+		return nil, nil, fmt.Errorf("traverse AGE: %w", err)
 	}
 	defer rows.Close()
 
-	var expanded []domain.Entity
-	expandedIDs := make([]string, 0)
+	var expandedIDs []string
 	for rows.Next() {
-		e, err := scanEntityRow(rows)
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, nil, err
+		}
+		// AGE returns string properties as JSON strings: "abc" — strip the quotes.
+		id := strings.Trim(raw, `"`)
+		if id != "" && id != "null" {
+			expandedIDs = append(expandedIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	if len(expandedIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	// Fetch full entity records from the relational store.
+	entityRows, err := db.pool.Query(ctx,
+		`SELECT id, type, canonical_name, aliases, metadata
+		 FROM entities
+		 WHERE project_id = $1 AND id = ANY($2::text[])`,
+		projectID, expandedIDs,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("traverse fetch entities: %w", err)
+	}
+	defer entityRows.Close()
+
+	var expanded []domain.Entity
+	for entityRows.Next() {
+		e, err := scanEntityRow(entityRows)
 		if err != nil {
 			return nil, nil, err
 		}
 		expanded = append(expanded, *e)
-		expandedIDs = append(expandedIDs, e.ID)
 	}
-	if err := rows.Err(); err != nil {
+	if err := entityRows.Err(); err != nil {
 		return nil, nil, err
 	}
 
@@ -605,7 +656,7 @@ func (db *DB) TraverseFromEntities(ctx context.Context, projectID string, entity
 		projectID, allIDs,
 	)
 	if err != nil {
-		return expanded, nil, fmt.Errorf("traverse relationships: %w", err)
+		return expanded, nil, fmt.Errorf("traverse fetch relationships: %w", err)
 	}
 	defer relRows.Close()
 

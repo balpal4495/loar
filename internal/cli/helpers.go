@@ -8,14 +8,12 @@ import (
 	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/store"
 	"github.com/balpal4495/loar/internal/store/postgres"
-	sqstore "github.com/balpal4495/loar/internal/store/sqlite"
 	"github.com/spf13/cobra"
 )
 
-// openStore opens the correct backend (Postgres or SQLite) based on the
-// project config discovered from the current working directory.
-// Returns the store, the project config, and an error.
-// The caller is responsible for calling store.Close() when done.
+// openStore opens a Postgres store for the project associated with the
+// current working directory. Returns the store, the project config, and
+// an error. The caller is responsible for calling store.Close() when done.
 func openStore(cmd *cobra.Command) (store.Store, *config.ProjectConfig, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -27,18 +25,6 @@ func openStore(cmd *cobra.Command) (store.Store, *config.ProjectConfig, error) {
 		return nil, nil, fmt.Errorf("no project configured; run \"loar project use\" to initialise one")
 	}
 
-	if cfg.Backend == "local" {
-		if cfg.DatabaseURL == "" {
-			return nil, nil, fmt.Errorf("project.toml has no database_url for local backend; run \"loar project use\" to reinitialise")
-		}
-		db, err := sqstore.New(cfg.DatabaseURL)
-		if err != nil {
-			return nil, nil, fmt.Errorf("local store: %w", err)
-		}
-		return db, cfg, nil
-	}
-
-	// Default: Postgres
 	dsn := cfg.DatabaseURL
 	if envDSN := os.Getenv("LOAR_DATABASE_URL"); envDSN != "" {
 		dsn = envDSN

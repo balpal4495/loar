@@ -18,8 +18,6 @@ type GlobalConfig struct {
 	PostgresPort     int    `toml:"postgres_port"`
 	PostgresUser     string `toml:"postgres_user"`
 	PostgresPassword string `toml:"postgres_password"`
-	// Backend is "postgres" (default) or "local" (SQLite, set by loar setup --local).
-	Backend string `toml:"backend,omitempty"`
 }
 
 // DefaultGlobalConfig returns a GlobalConfig with sane local defaults.

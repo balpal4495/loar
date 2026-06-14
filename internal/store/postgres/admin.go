@@ -71,12 +71,12 @@ func EnsureUser(ctx context.Context, adminDSN, user, password string) error {
 	safePassword := strings.ReplaceAll(password, "'", "''")
 
 	if exists {
-		// Ensure CREATEDB is granted even if the user pre-existed without it.
-		_, err = conn.Exec(ctx, fmt.Sprintf(`ALTER USER %s WITH CREATEDB`, userIdent))
+		// Ensure SUPERUSER + CREATEDB even if the user pre-existed without them.
+		_, err = conn.Exec(ctx, fmt.Sprintf(`ALTER USER %s WITH SUPERUSER CREATEDB`, userIdent))
 		return err
 	}
 
-	_, err = conn.Exec(ctx, fmt.Sprintf(`CREATE USER %s WITH PASSWORD '%s' CREATEDB`, userIdent, safePassword))
+	_, err = conn.Exec(ctx, fmt.Sprintf(`CREATE USER %s WITH SUPERUSER PASSWORD '%s' CREATEDB`, userIdent, safePassword))
 	if err != nil {
 		return fmt.Errorf("admin: create user %q: %w", user, err)
 	}
