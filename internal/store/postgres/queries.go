@@ -155,6 +155,18 @@ func (db *DB) GetObservation(ctx context.Context, id string) (*domain.Observatio
 	return scanObservation(row)
 }
 
+// ExistsObservationBySourceID returns true if the project already has an
+// observation with the given source_id. Used to skip records on incremental
+// ingest runs.
+func (db *DB) ExistsObservationBySourceID(ctx context.Context, projectID, sourceID string) (bool, error) {
+	var exists bool
+	err := db.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM observations WHERE project_id = $1 AND source_id = $2)`,
+		projectID, sourceID,
+	).Scan(&exists)
+	return exists, err
+}
+
 // ListObservations returns all observations for a project ordered by created_at.
 func (db *DB) ListObservations(ctx context.Context, projectID string) ([]*domain.Observation, error) {
 	rows, err := db.pool.Query(ctx,
@@ -271,15 +283,16 @@ func splitKeywords(query string) []string {
 }
 
 // CreateRelationship inserts a new relationship. If r.ID is empty a new UUID is assigned.
+// Duplicate (project_id, source_id, target_id, relationship_type) tuples are silently ignored.
 func (db *DB) CreateRelationship(ctx context.Context, projectID string, r *domain.Relationship) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
 	}
 	_, err := db.pool.Exec(ctx,
 		`INSERT INTO relationships
-		 (id, project_id, source_id, target_id, relationship_type, confidence)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		r.ID, projectID, r.SourceID, r.TargetID, r.Type, r.Confidence,
+                 (id, project_id, source_id, target_id, relationship_type, confidence)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (project_id, source_id, target_id, relationship_type) DO NOTHING`,
 	)
 	return err
 }

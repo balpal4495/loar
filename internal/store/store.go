@@ -30,6 +30,9 @@ type ObservationStore interface {
 	GetObservation(ctx context.Context, id string) (*domain.Observation, error)
 	ListObservations(ctx context.Context, projectID string) ([]*domain.Observation, error)
 	SearchObservations(ctx context.Context, projectID, query string) ([]*domain.Observation, error)
+	// ExistsObservationBySourceID reports whether the project already contains
+	// an observation with the given source_id. Used for incremental ingestion.
+	ExistsObservationBySourceID(ctx context.Context, projectID, sourceID string) (bool, error)
 }
 
 // RelationshipStore manages relationship persistence.

@@ -21,6 +21,7 @@ func NewProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectUseCmd())
 	cmd.AddCommand(newProjectListCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
+	cmd.AddCommand(newProjectCleanCmd())
 	return cmd
 }
 
@@ -104,7 +105,63 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 	}
 }
 
-// newProjectListCmd returns `loar project list`.
+// newProjectCleanCmd returns `loar project clean`.
+// Truncates all observations, entities, and entity links without dropping the database.
+func newProjectCleanCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "clean",
+		Short: "Wipe all observations and entities from the current project",
+		Long: `Deletes all observations, entities, and entity links from the current project
+database. The database and schema are preserved; only the data is removed.
+
+Useful when you want to re-ingest from scratch without fully recreating the project.
+
+Use --force to skip the confirmation prompt.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dsn := mustProjectDSN(cmd)
+			ctx := cmd.Context()
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("project clean: %w", err)
+			}
+
+			cfg, _, err := config.Find(cwd)
+			if err != nil {
+				return fmt.Errorf("project clean: %w", err)
+			}
+
+			if !force {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"This will delete all observations and entities for project %q. Continue? [y/N] ",
+					cfg.Project)
+				var answer string
+				fmt.Fscan(cmd.InOrStdin(), &answer)
+				if answer != "y" && answer != "Y" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+					return nil
+				}
+			}
+
+			db, err := postgres.New(ctx, dsn)
+			if err != nil {
+				return fmt.Errorf("project clean: connect: %w", err)
+			}
+			defer db.Close()
+
+			if err := db.CleanProject(ctx); err != nil {
+				return fmt.Errorf("project clean: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Project %q cleaned. Re-run \"loar ingest\" to repopulate.\n", cfg.Project)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
+	return cmd
+}
 // Lists all loar-* databases on the configured Postgres server.
 func newProjectListCmd() *cobra.Command {
 	return &cobra.Command{

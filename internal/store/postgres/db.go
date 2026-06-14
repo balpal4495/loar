@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -79,6 +80,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 		// Full-text search index on observation content.
 		`CREATE INDEX IF NOT EXISTS observations_content_fts
 		 ON observations USING gin(to_tsvector('english', content))`,
+		// Unique constraint on relationships so co_occurs links are idempotent.
+		`CREATE UNIQUE INDEX IF NOT EXISTS relationships_unique
+		 ON relationships (project_id, source_id, target_id, relationship_type)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.pool.Exec(ctx, s); err != nil {
@@ -86,4 +90,27 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// CleanProject deletes all observations, entities, and their links from the
+// database. The schema and project record are preserved. Runs in a single
+// transaction so a failure leaves the DB unchanged.
+func (db *DB) CleanProject(ctx context.Context) error {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("clean: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	for _, stmt := range []string{
+		`DELETE FROM observation_entities`,
+		`DELETE FROM relationships`,
+		`DELETE FROM observations`,
+		`DELETE FROM entities`,
+	} {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
 }
