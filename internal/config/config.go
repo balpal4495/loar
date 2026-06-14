@@ -18,7 +18,8 @@ const (
 
 // ProjectConfig holds the per-directory project association.
 type ProjectConfig struct {
-	Project string `toml:"project"`
+	Project     string `toml:"project"`
+	DatabaseURL string `toml:"database_url,omitempty"`
 }
 
 // configPath returns the absolute path to the project.toml file starting
@@ -29,12 +30,12 @@ func configPath(dir string) string {
 	return filepath.Join(dir, dirName, fileName)
 }
 
-// Write writes the project name to .loar/project.toml in dir.
-func Write(dir, projectName string) error {
+// Write writes a ProjectConfig to .loar/project.toml in dir.
+func Write(dir string, cfg *ProjectConfig) error {
 	if dir == "" {
 		return errors.New("config: directory must not be empty")
 	}
-	if projectName == "" {
+	if cfg.Project == "" {
 		return errors.New("config: project name must not be empty")
 	}
 
@@ -49,7 +50,7 @@ func Write(dir, projectName string) error {
 	}
 	defer f.Close()
 
-	return toml.NewEncoder(f).Encode(ProjectConfig{Project: projectName})
+	return toml.NewEncoder(f).Encode(cfg)
 }
 
 // Load reads the project.toml from dir. It returns an error if the file does

@@ -11,7 +11,7 @@ import (
 func TestWriteAndLoad(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := config.Write(dir, "tierone"); err != nil {
+	if err := config.Write(dir, &config.ProjectConfig{Project: "tierone"}); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -32,13 +32,13 @@ func TestWriteAndLoad(t *testing.T) {
 
 func TestWriteEmptyName(t *testing.T) {
 	dir := t.TempDir()
-	if err := config.Write(dir, ""); err == nil {
+	if err := config.Write(dir, &config.ProjectConfig{Project: ""}); err == nil {
 		t.Error("Write with empty name should return an error")
 	}
 }
 
 func TestWriteEmptyDir(t *testing.T) {
-	if err := config.Write("", "myproject"); err == nil {
+	if err := config.Write("", &config.ProjectConfig{Project: "myproject"}); err == nil {
 		t.Error("Write with empty dir should return an error")
 	}
 }
@@ -51,7 +51,7 @@ func TestFind(t *testing.T) {
 	}
 
 	// Write config in root.
-	if err := config.Write(root, "myproject"); err != nil {
+	if err := config.Write(root, &config.ProjectConfig{Project: "myproject"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,10 +78,10 @@ func TestFindNotFound(t *testing.T) {
 
 func TestOverwrite(t *testing.T) {
 	dir := t.TempDir()
-	if err := config.Write(dir, "first"); err != nil {
+	if err := config.Write(dir, &config.ProjectConfig{Project: "first"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := config.Write(dir, "second"); err != nil {
+	if err := config.Write(dir, &config.ProjectConfig{Project: "second"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(dir)

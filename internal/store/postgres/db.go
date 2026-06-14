@@ -76,6 +76,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 			role           TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (observation_id, entity_id)
 		)`,
+		// Full-text search index on observation content.
+		`CREATE INDEX IF NOT EXISTS observations_content_fts
+		 ON observations USING gin(to_tsvector('english', content))`,
 	}
 	for _, s := range stmts {
 		if _, err := db.pool.Exec(ctx, s); err != nil {
