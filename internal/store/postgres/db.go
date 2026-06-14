@@ -147,8 +147,7 @@ func (db *DB) syncToGraph(ctx context.Context) error {
 		if _, err := db.pool.Exec(ctx,
 			`SELECT * FROM cypher('loar_graph', $$
 			   MERGE (n:Entity {id: $id})
-			   ON CREATE SET n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
-			   ON MATCH SET  n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
+			   SET n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
 			 $$, $1::agtype) AS (v agtype)`, params); err != nil {
 			return fmt.Errorf("sync graph entity %s: %w", id, err)
 		}
@@ -178,8 +177,7 @@ func (db *DB) syncToGraph(ctx context.Context) error {
 			`SELECT * FROM cypher('loar_graph', $$
 			   MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
 			   MERGE (a)-[r:RELATED {id: $id}]->(b)
-			   ON CREATE SET r.type = $rel_type, r.confidence = $confidence
-			   ON MATCH SET  r.confidence = $confidence
+			   SET r.type = $rel_type, r.confidence = $confidence
 			 $$, $1::agtype) AS (v agtype)`, params); err != nil {
 			// Non-fatal: relationship will be re-synced when entities exist.
 			continue
