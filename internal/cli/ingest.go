@@ -15,6 +15,7 @@ import (
 func NewIngestCmd() *cobra.Command {
 	var recursive bool
 	var skipErrors bool
+	var incremental bool
 
 	cmd := &cobra.Command{
 		Use:   "ingest [file|dir|url|-]",
@@ -29,7 +30,8 @@ Examples:
   loar ingest ./data/
   loar ingest ./data/ --recursive
   loar ingest https://example.com/feed.ndjson
-  cat data.ndjson | loar ingest`,
+  cat data.ndjson | loar ingest
+  loar ingest ./committed --incremental   # skip already-ingested records`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dsn := mustProjectDSN(cmd)
@@ -61,6 +63,7 @@ Examples:
 			}
 
 			ing := ingestion.New(db, proj.ID)
+			ing.Incremental = incremental
 
 			var count int
 			switch {
@@ -97,13 +100,18 @@ Examples:
 				}
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Ingested %d observation(s) into project %q\n", count, cfg.Project)
+			if incremental {
+				fmt.Fprintf(cmd.OutOrStdout(), "Ingested %d observation(s) into project %q (incremental — duplicates skipped)\n", count, cfg.Project)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Ingested %d observation(s) into project %q\n", count, cfg.Project)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Recurse into subdirectories")
 	cmd.Flags().BoolVar(&skipErrors, "skip-errors", false, "Suppress warnings for unreadable or invalid files")
+	cmd.Flags().BoolVarP(&incremental, "incremental", "i", false, "Skip records whose source ID already exists in the store")
 	return cmd
 }
 

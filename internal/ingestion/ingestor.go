@@ -20,13 +20,15 @@ import (
 	"time"
 
 	"github.com/balpal4495/loar/internal/domain"
+	"github.com/balpal4495/loar/internal/entity"
 	"github.com/balpal4495/loar/internal/store"
 )
 
 // Ingestor reads records from various sources and stores them as observations.
 type Ingestor struct {
-	store     store.Store
-	projectID string
+	store       store.Store
+	projectID   string
+	Incremental bool // when true, records whose source_id already exists are skipped
 }
 
 // New creates a new Ingestor for the given project.
@@ -131,10 +133,27 @@ func (ing *Ingestor) IngestReader(ctx context.Context, r io.Reader, source strin
 			content = buildContent(rec)
 		}
 
+		// Use the record's own "id" field as source_id when present —
+		// this preserves chronicle entry UUIDs rather than the filename.
+		sourceID := source
+		if idVal, ok := rec["id"]; ok {
+			if idStr, ok := idVal.(string); ok && idStr != "" {
+				sourceID = idStr
+			}
+		}
+
+		// Incremental mode: skip records already present in the store.
+		if ing.Incremental {
+			exists, err := ing.store.ExistsObservationBySourceID(ctx, ing.projectID, sourceID)
+			if err == nil && exists {
+				continue
+			}
+		}
+
 		obs := &domain.Observation{
 			ProjectID: ing.projectID,
 			Content:   content,
-			SourceID:  source,
+			SourceID:  sourceID,
 			Temporal: domain.Temporal{
 				ObservedAt: &now,
 				OccurredAt: extractTime(rec),
@@ -145,6 +164,8 @@ func (ing *Ingestor) IngestReader(ctx context.Context, r io.Reader, source strin
 		if err := ing.store.CreateObservation(ctx, obs); err != nil {
 			return count, fmt.Errorf("ingestion: store observation: %w", err)
 		}
+		// Extract entities from content and link them to this observation.
+		_ = entity.ExtractAndLink(ctx, ing.store, ing.projectID, obs)
 		count++
 	}
 	return count, nil
@@ -299,6 +320,7 @@ func buildContent(rec map[string]any) string {
 	}
 
 	seen := make(map[string]bool)
+	seenValues := make(map[string]bool)
 	var parts []string
 
 	appendField := func(k string, v any) {
@@ -308,7 +330,8 @@ func buildContent(rec map[string]any) string {
 		seen[k] = true
 		switch val := v.(type) {
 		case string:
-			if val != "" {
+			if val != "" && !seenValues[val] {
+				seenValues[val] = true
 				parts = append(parts, k+": "+val)
 			}
 		case []any:
@@ -319,7 +342,11 @@ func buildContent(rec map[string]any) string {
 				}
 			}
 			if len(items) > 0 {
-				parts = append(parts, k+": "+strings.Join(items, ", "))
+				joined := strings.Join(items, ", ")
+				if !seenValues[joined] {
+					seenValues[joined] = true
+					parts = append(parts, k+": "+joined)
+				}
 			}
 		}
 	}

@@ -46,6 +46,9 @@ func (m *mockStore) ListObservations(_ context.Context, _ string) ([]*domain.Obs
 func (m *mockStore) SearchObservations(_ context.Context, _, _ string) ([]*domain.Observation, error) {
 	return nil, nil
 }
+func (m *mockStore) ExistsObservationBySourceID(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
 func (m *mockStore) CreateRelationship(_ context.Context, _ string, _ *domain.Relationship) error {
 	return nil
 }

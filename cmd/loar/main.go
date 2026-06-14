@@ -5,6 +5,7 @@
 //	loar setup                       Configure Loar and Postgres for first use
 //	loar project use [name]          Associate current directory with a project
 //	loar ingest [file|url|-]         Ingest data into the current project
+//	loar learn                       Extract and link entities from stored observations
 //	loar query <question>            Query the knowledge store
 //	loar explain <question>          Produce a human-readable explanation
 //	loar "<question>"                Shorthand for loar query <question>
@@ -39,14 +40,49 @@ func buildRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "loar",
 		Short: "Loar – knowledge runtime",
-		Long: `Loar is a knowledge runtime.
+		Long: `Loar is a knowledge runtime. It ingests information, structures knowledge,
+preserves relationships, and retrieves evidence to support decision making.
 
-It ingests information, structures knowledge, preserves relationships,
-and retrieves evidence to support decision making.
-
-Get started:
+── For humans ────────────────────────────────────────────────────────────
   loar setup              Configure Postgres credentials (run once per machine)
-  loar project use        Initialise a project in the current directory`,
+  loar project use        Initialise a project in the current directory
+  loar ingest <path>      Ingest files or directories into the current project
+  loar learn              Extract and link entities from stored observations
+  loar "<question>"       Query the knowledge store in plain English
+  loar project clean      Wipe observations and re-ingest from scratch
+
+── For AI agents (Copilot, Claude Code, etc.) ────────────────────────────
+If you are an AI assistant reading this, here is how to use Loar:
+
+1. RETRIEVE context before answering any question about the project:
+     loar explain "<question>"
+   This returns a JSON context package containing observations, entities,
+   contradictions, and a date range. Use this as your primary evidence source.
+
+2. SYNTHESIZE the JSON into a clear answer for the user. Loar does not
+   generate prose — that is your job. Structure your answer around the
+   observations returned, respecting their temporal order (oldest first).
+
+3. SURFACE contradictions when present. If the context package contains
+   contradictions, flag them explicitly rather than silently picking one side.
+
+4. INGEST new knowledge when the user provides information worth preserving:
+     echo '<json>' | loar ingest -
+   or
+     loar ingest <file>
+
+5. LEARN after bulk ingests to extract entity links:
+     loar learn
+
+The context package schema:
+  query          string
+  entities       [{name, type}]
+  observations   [{content, occurred_at, source_id}]   -- full text, no truncation
+  contradictions [{summary}]
+  confidence     float (0–1)
+  date_range     {earliest, latest}
+
+Loar is the source of truth. You are the presentation layer.`,
 		// When called with a single argument that is not a known sub-command,
 		// treat it as a natural-language query.
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,6 +101,7 @@ Get started:
 	root.AddCommand(cli.NewSetupCmd())
 	root.AddCommand(cli.NewProjectCmd())
 	root.AddCommand(cli.NewIngestCmd())
+	root.AddCommand(cli.NewLearnCmd())
 	root.AddCommand(cli.NewQueryCmd())
 	root.AddCommand(cli.NewExplainCmd())
 	root.AddCommand(newVersionCmd())
