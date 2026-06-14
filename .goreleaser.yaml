@@ -1,0 +1,69 @@
+version: 2
+
+project_name: loar
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: loar
+    main: ./cmd/loar
+    binary: loar
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+        -X main.version={{.Version}}
+        -X main.commit={{.Commit}}
+        -X main.date={{.Date}}
+
+archives:
+  - id: loar
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: loar
+    repository:
+      owner: balpal4495
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/balpal4495/loar"
+    description: "Loar – a knowledge runtime for ingesting, structuring, and retrieving evidence."
+    license: "MIT"
+    dependencies:
+      - name: postgresql@16
+    install: |
+      bin.install "loar"
+    caveats: |
+      Loar requires PostgreSQL to be running with a dedicated database.
+
+      If PostgreSQL is not already running, start it:
+
+        brew services start postgresql@16
+
+      Create the database and user (one-time setup):
+
+        psql postgres -c "CREATE USER loar WITH PASSWORD 'loar';"
+        psql postgres -c "CREATE DATABASE loar OWNER loar;"
+
+      Add the connection string to your shell profile (~/.zshrc or ~/.bashrc):
+
+        export LOAR_DATABASE_URL="postgres://loar:loar@localhost:5432/loar?sslmode=disable"
+
+      Verify the installation:
+
+        loar --help

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/balpal4495/loar/internal/domain"
@@ -178,31 +179,95 @@ func (db *DB) ListObservations(ctx context.Context, projectID string) ([]*domain
 	return obs, rows.Err()
 }
 
-// SearchObservations performs a case-insensitive keyword search against
-// observation content within a project.
+// SearchObservations performs full-text search against observation content.
+// It splits the query into individual keywords and uses PostgreSQL's
+// to_tsvector/to_tsquery for ranked, language-aware matching, falling back
+// to ILIKE per-keyword when no FTS results are found.
 func (db *DB) SearchObservations(ctx context.Context, projectID, query string) ([]*domain.Observation, error) {
+	// Build a tsquery by AND-ing all keywords together.
+	keywords := splitKeywords(query)
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+
+	// Try full-text search first.
+	tsquery := strings.Join(keywords, " & ")
 	rows, err := db.pool.Query(ctx,
 		`SELECT id, project_id, source_id, content,
 		        occurred_at, observed_at, resolved_at, learned_at, metadata
 		 FROM observations
-		 WHERE project_id = $1 AND content ILIKE '%' || $2 || '%'
-		 ORDER BY created_at`,
-		projectID, query,
+		 WHERE project_id = $1
+		   AND to_tsvector('english', content) @@ to_tsquery('english', $2)
+		 ORDER BY ts_rank(to_tsvector('english', content), to_tsquery('english', $2)) DESC`,
+		projectID, tsquery,
 	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var obs []*domain.Observation
-	for rows.Next() {
-		o, err := scanObservationRows(rows)
-		if err != nil {
-			return nil, err
+	if err == nil {
+		defer rows.Close()
+		var obs []*domain.Observation
+		for rows.Next() {
+			o, err := scanObservationRows(rows)
+			if err != nil {
+				return nil, err
+			}
+			obs = append(obs, o)
 		}
-		obs = append(obs, o)
+		if rowErr := rows.Err(); rowErr != nil {
+			return nil, rowErr
+		}
+		if len(obs) > 0 {
+			return obs, nil
+		}
 	}
-	return obs, rows.Err()
+
+	// Fallback: OR-based ILIKE across all keywords.
+	seen := map[string]bool{}
+	var results []*domain.Observation
+	for _, kw := range keywords {
+		kwRows, err := db.pool.Query(ctx,
+			`SELECT id, project_id, source_id, content,
+			        occurred_at, observed_at, resolved_at, learned_at, metadata
+			 FROM observations
+			 WHERE project_id = $1 AND content ILIKE '%' || $2 || '%'
+			 ORDER BY created_at`,
+			projectID, kw,
+		)
+		if err != nil {
+			continue
+		}
+		for kwRows.Next() {
+			o, err := scanObservationRows(kwRows)
+			if err != nil {
+				kwRows.Close()
+				return nil, err
+			}
+			if !seen[o.ID] {
+				seen[o.ID] = true
+				results = append(results, o)
+			}
+		}
+		kwRows.Close()
+	}
+	return results, nil
+}
+
+// splitKeywords tokenises a natural-language query into searchable keywords.
+// Stop words and short tokens are removed.
+func splitKeywords(query string) []string {
+	stopWords := map[string]bool{
+		"a": true, "an": true, "the": true, "is": true, "are": true,
+		"was": true, "were": true, "what": true, "how": true, "why": true,
+		"when": true, "did": true, "do": true, "does": true, "in": true,
+		"of": true, "to": true, "for": true, "and": true, "or": true,
+		"about": true, "made": true, "been": true, "has": true, "have": true,
+	}
+	replacer := strings.NewReplacer("?", "", "!", "", ".", "", ",", "", "'", "", "\"", "")
+	var keywords []string
+	for _, word := range strings.Fields(replacer.Replace(strings.ToLower(query))) {
+		if len(word) >= 3 && !stopWords[word] {
+			keywords = append(keywords, word)
+		}
+	}
+	return keywords
 }
 
 // CreateRelationship inserts a new relationship. If r.ID is empty a new UUID is assigned.

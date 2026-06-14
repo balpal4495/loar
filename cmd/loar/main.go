@@ -2,7 +2,8 @@
 //
 // Usage:
 //
-//	loar project use <name>          Associate current directory with a project
+//	loar setup                       Configure Loar and Postgres for first use
+//	loar project use [name]          Associate current directory with a project
 //	loar ingest [file|url|-]         Ingest data into the current project
 //	loar query <question>            Query the knowledge store
 //	loar explain <question>          Produce a human-readable explanation
@@ -17,6 +18,13 @@ import (
 
 	"github.com/balpal4495/loar/internal/cli"
 	"github.com/spf13/cobra"
+)
+
+// Set at build time via -ldflags.
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
 )
 
 func main() {
@@ -36,7 +44,9 @@ func buildRoot() *cobra.Command {
 It ingests information, structures knowledge, preserves relationships,
 and retrieves evidence to support decision making.
 
-Set LOAR_DATABASE_URL to your Postgres connection string before use.`,
+Get started:
+  loar setup              Configure Postgres credentials (run once per machine)
+  loar project use        Initialise a project in the current directory`,
 		// When called with a single argument that is not a known sub-command,
 		// treat it as a natural-language query.
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -52,10 +62,12 @@ Set LOAR_DATABASE_URL to your Postgres connection string before use.`,
 		SilenceErrors:             true,
 	}
 
+	root.AddCommand(cli.NewSetupCmd())
 	root.AddCommand(cli.NewProjectCmd())
 	root.AddCommand(cli.NewIngestCmd())
 	root.AddCommand(cli.NewQueryCmd())
 	root.AddCommand(cli.NewExplainCmd())
+	root.AddCommand(newVersionCmd())
 
 	// Allow `loar "some question"` without the `query` sub-command by
 	// hooking into cobra's default arg handling: if the first arg is not a
@@ -88,4 +100,14 @@ func isKnownSubCommand(root *cobra.Command, name string) bool {
 		}
 	}
 	return false
+}
+
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "loar %s\n  commit: %s\n  built:  %s\n", version, commit, date)
+		},
+	}
 }

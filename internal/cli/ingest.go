@@ -13,20 +13,26 @@ import (
 
 // NewIngestCmd returns the `loar ingest` command.
 func NewIngestCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "ingest [file|url|-]",
-		Short: "Ingest data into the current project",
-		Long: `Ingests data from a file, URL, or stdin into the current project.
+	var recursive bool
+	var skipErrors bool
 
-Supported formats: NDJSON (one JSON object per line) or a JSON array.
+	cmd := &cobra.Command{
+		Use:   "ingest [file|dir|url|-]",
+		Short: "Ingest data into the current project",
+		Long: `Ingests data from a file, directory, URL, or stdin into the current project.
+
+Supported formats: NDJSON (one JSON object per line), JSON array.
+Supported file extensions: .json, .ndjson, .jsonl
 
 Examples:
   loar ingest transfers.json
+  loar ingest ./data/
+  loar ingest ./data/ --recursive
   loar ingest https://example.com/feed.ndjson
   cat data.ndjson | loar ingest`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dsn := mustDSN(cmd)
+			dsn := mustProjectDSN(cmd)
 			ctx := cmd.Context()
 
 			cwd, err := os.Getwd()
@@ -57,21 +63,48 @@ Examples:
 			ing := ingestion.New(db, proj.ID)
 
 			var count int
-			if len(args) == 0 || args[0] == "-" {
+			switch {
+			case len(args) == 0 || args[0] == "-":
 				count, err = ing.IngestReader(ctx, cmd.InOrStdin(), "stdin")
-			} else if isURL(args[0]) {
+				if err != nil {
+					return err
+				}
+
+			case isURL(args[0]):
 				count, err = ing.IngestURL(ctx, args[0])
-			} else {
-				count, err = ing.IngestFile(ctx, args[0])
-			}
-			if err != nil {
-				return err
+				if err != nil {
+					return err
+				}
+
+			default:
+				info, statErr := os.Stat(args[0])
+				if statErr != nil {
+					return fmt.Errorf("ingest: %w", statErr)
+				}
+				if info.IsDir() {
+					var errs []error
+					count, errs = ing.IngestDir(ctx, args[0], recursive)
+					if !skipErrors {
+						for _, e := range errs {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", e)
+						}
+					}
+				} else {
+					count, err = ing.IngestFile(ctx, args[0])
+					if err != nil {
+						return err
+					}
+				}
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Ingested %d observation(s) into project %q\n", count, cfg.Project)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Recurse into subdirectories")
+	cmd.Flags().BoolVar(&skipErrors, "skip-errors", false, "Suppress warnings for unreadable or invalid files")
+	return cmd
 }
 
 // isURL returns true when s starts with http:// or https://.

@@ -118,7 +118,7 @@ func runExplain(cmd *cobra.Command, args []string) error {
 // retrieve runs the full retrieval pipeline and returns the ContextPackage.
 func retrieve(cmd *cobra.Command, args []string) (*domain.ContextPackage, error) {
 	question := strings.Join(args, " ")
-	dsn := mustDSN(cmd)
+	dsn := mustProjectDSN(cmd)
 	ctx := cmd.Context()
 
 	cwd, err := os.Getwd()
