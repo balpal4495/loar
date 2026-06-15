@@ -38,18 +38,44 @@ func New(s store.Store) *Engine {
 func (e *Engine) Query(ctx context.Context, projectID, query string) (*domain.ContextPackage, error) {
 	intent := DetectIntent(query)
 
-	entities, err := e.resolveEntities(ctx, projectID, query)
+	// 1. Resolve seed entities from the query text.
+	seedEntities, err := e.resolveEntities(ctx, projectID, query)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: entity resolution: %w", err)
 	}
 
-	observations, err := e.gatherObservations(ctx, projectID, query, entities)
+	// 2. Expand the seed set up to 2 hops through the relationship graph.
+	//    This surfaces connected entities (e.g. Arsenal → scouts → Romano)
+	//    without requiring the query to name them explicitly.
+	seedIDs := make([]string, len(seedEntities))
+	for i, ent := range seedEntities {
+		seedIDs[i] = ent.ID
+	}
+	expandedEntities, relationships, err := e.store.TraverseFromEntities(ctx, projectID, seedIDs, 2)
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: graph traversal: %w", err)
+	}
+
+	// Merge seeds + expanded into a deduplicated entity set for observation gathering.
+	entityMap := make(map[string]domain.Entity, len(seedEntities)+len(expandedEntities))
+	for _, ent := range seedEntities {
+		entityMap[ent.ID] = ent
+	}
+	for _, ent := range expandedEntities {
+		entityMap[ent.ID] = ent
+	}
+	allEntities := make([]domain.Entity, 0, len(entityMap))
+	for _, ent := range entityMap {
+		allEntities = append(allEntities, ent)
+	}
+
+	// 3. Gather observations for the full entity set.
+	observations, err := e.gatherObservations(ctx, projectID, query, allEntities)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: evidence gathering: %w", err)
 	}
 
 	// For timeline queries, present observations in chronological order.
-	// For all other intents the store's default (created_at) ordering is used.
 	if intent == IntentTimeline {
 		sort.Slice(observations, func(i, j int) bool {
 			ti := observations[i].Temporal.OccurredAt
@@ -64,23 +90,18 @@ func (e *Engine) Query(ctx context.Context, projectID, query string) (*domain.Co
 		})
 	}
 
-	relationships, err := e.traverseRelationships(ctx, projectID, entities)
-	if err != nil {
-		return nil, fmt.Errorf("retrieval: relationship traversal: %w", err)
-	}
-
 	pkg := &domain.ContextPackage{
 		Query:         query,
-		Entities:      entities,
+		Entities:      allEntities,
 		Observations:  observations,
 		Relationships: relationships,
 		Confidence:    computeConfidence(observations),
 	}
 
 	pkg.Evidence = buildEvidence(observations)
-	pkg.Contradictions = findContradictions(observations, entities, intent)
+	pkg.Contradictions = findContradictions(observations, allEntities, intent)
 	pkg.Timeline = buildTimeline(observations)
-	pkg.Summary = buildSummary(intent, query, entities, observations)
+	pkg.Summary = buildSummary(intent, query, allEntities, observations)
 
 	return pkg, nil
 }
@@ -166,24 +187,18 @@ func (e *Engine) gatherObservations(ctx context.Context, projectID, query string
 	return obs, nil
 }
 
-// traverseRelationships collects all relationships involving the resolved entities.
+// traverseRelationships is kept for any future callers outside Query.
+// Query now uses store.TraverseFromEntities directly for multi-hop support.
 func (e *Engine) traverseRelationships(ctx context.Context, projectID string, entities []domain.Entity) ([]domain.Relationship, error) {
-	seen := map[string]bool{}
-	var rels []domain.Relationship
-
-	for _, ent := range entities {
-		entRels, err := e.store.FindRelationships(ctx, projectID, ent.ID)
-		if err != nil {
-			continue
-		}
-		for _, r := range entRels {
-			if !seen[r.ID] {
-				seen[r.ID] = true
-				rels = append(rels, *r)
-			}
-		}
+	if len(entities) == 0 {
+		return nil, nil
 	}
-	return rels, nil
+	ids := make([]string, len(entities))
+	for i, ent := range entities {
+		ids[i] = ent.ID
+	}
+	_, rels, err := e.store.TraverseFromEntities(ctx, projectID, ids, 1)
+	return rels, err
 }
 
 // tokenise splits a query into candidate words, trimming punctuation.

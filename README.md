@@ -41,13 +41,13 @@ make install
 
 ### 2. Start a database
 
-Loar uses PostgreSQL. If you have Docker:
+Loar uses PostgreSQL with the [Apache AGE](https://age.apache.org/) graph extension. If you have Docker:
 
 ```sh
 make db-up
 ```
 
-Or use an existing Postgres instance.
+This starts `apache/age:release_PG16_1.6.0` — Postgres 16 with AGE pre-installed. Or point Loar at any Postgres instance that has AGE available.
 
 ### 3. Configure
 
@@ -107,6 +107,7 @@ loar "Why was the fundamentals provider switched?"
 | `loar ingest [file\|dir\|url\|-]` | Ingest data into the current project |
 | `loar query <question>` | Query the knowledge store |
 | `loar explain <question>` | Retrieve evidence and produce a narrative explanation |
+| `loar serve` | Start the MCP server (stdio) for agent integrations |
 
 ---
 

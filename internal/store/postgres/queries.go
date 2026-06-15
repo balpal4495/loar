@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -79,7 +81,19 @@ func (db *DB) CreateEntity(ctx context.Context, projectID string, e *domain.Enti
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		e.ID, projectID, e.Type, e.CanonicalName, e.Aliases, meta,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Mirror the entity into the Apache AGE property graph so it is
+	// immediately available for Cypher traversal.
+	params := fmt.Sprintf(`{"id": %q, "project_id": %q, "canonical_name": %q, "type": %q}`,
+		e.ID, projectID, e.CanonicalName, e.Type)
+	_, _ = db.pool.Exec(ctx,
+		`SELECT * FROM cypher('loar_graph', $$
+		   MERGE (n:Entity {id: $id})
+		   SET n.project_id = $project_id, n.canonical_name = $canonical_name, n.type = $type
+		 $$, $1::agtype) AS (v agtype)`, params)
+	return nil
 }
 
 // GetEntity retrieves an entity by ID.
@@ -293,8 +307,23 @@ func (db *DB) CreateRelationship(ctx context.Context, projectID string, r *domai
                  (id, project_id, source_id, target_id, relationship_type, confidence)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (project_id, source_id, target_id, relationship_type) DO NOTHING`,
+		r.ID, projectID, r.SourceID, r.TargetID, r.Type, r.Confidence,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Mirror the edge into the Apache AGE property graph.
+	// MATCH on Entity nodes that were written by CreateEntity; if either
+	// endpoint is missing the Cypher is a no-op (returns 0 rows, no error).
+	params := fmt.Sprintf(`{"id": %q, "source_id": %q, "target_id": %q, "rel_type": %q, "confidence": %v}`,
+		r.ID, r.SourceID, r.TargetID, r.Type, r.Confidence)
+	_, _ = db.pool.Exec(ctx,
+		`SELECT * FROM cypher('loar_graph', $$
+		   MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
+		   MERGE (a)-[r:RELATED {id: $id}]->(b)
+		   SET r.type = $rel_type, r.confidence = $confidence
+		 $$, $1::agtype) AS (v agtype)`, params)
+	return nil
 }
 
 // ListRelationships returns all relationships for a project.
@@ -458,4 +487,209 @@ func scanObservation(row rowScanner) (*domain.Observation, error) {
 
 func scanObservationRows(row rowScanner) (*domain.Observation, error) {
 	return scanObservation(row)
+}
+
+// --- entity_confidence ---
+
+// WriteEntityConfidence inserts a new confidence snapshot for an entity.
+// Rows are never updated — the time-series is append-only so trend is queryable.
+func (db *DB) WriteEntityConfidence(ctx context.Context, ec *domain.EntityConfidence) error {
+	if ec.ID == "" {
+		ec.ID = uuid.NewString()
+	}
+	if ec.ComputedAt.IsZero() {
+		ec.ComputedAt = time.Now()
+	}
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO entity_confidence
+		 (id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		ec.ID, ec.EntityID, ec.ProjectID, ec.Score,
+		ec.ObservationCount, ec.ResolvedCount, ec.AccuracyRate, ec.ComputedAt,
+	)
+	return err
+}
+
+// LatestEntityConfidence returns the most recent confidence snapshot for an entity.
+func (db *DB) LatestEntityConfidence(ctx context.Context, projectID, entityID string) (*domain.EntityConfidence, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at
+		 FROM entity_confidence
+		 WHERE project_id = $1 AND entity_id = $2
+		 ORDER BY computed_at DESC LIMIT 1`,
+		projectID, entityID,
+	)
+	return scanEntityConfidence(row)
+}
+
+// EntityConfidenceHistory returns confidence snapshots for an entity in
+// reverse chronological order, capped at limit rows.
+func (db *DB) EntityConfidenceHistory(ctx context.Context, projectID, entityID string, limit int) ([]*domain.EntityConfidence, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, entity_id, project_id, score, observation_count, resolved_count, accuracy_rate, computed_at
+		 FROM entity_confidence
+		 WHERE project_id = $1 AND entity_id = $2
+		 ORDER BY computed_at DESC LIMIT $3`,
+		projectID, entityID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*domain.EntityConfidence
+	for rows.Next() {
+		ec, err := scanEntityConfidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, ec)
+	}
+	return results, rows.Err()
+}
+
+func scanEntityConfidence(row rowScanner) (*domain.EntityConfidence, error) {
+	var ec domain.EntityConfidence
+	var computedAt time.Time
+	if err := row.Scan(
+		&ec.ID, &ec.EntityID, &ec.ProjectID, &ec.Score,
+		&ec.ObservationCount, &ec.ResolvedCount, &ec.AccuracyRate, &computedAt,
+	); err != nil {
+		return nil, err
+	}
+	ec.ComputedAt = computedAt
+	return &ec, nil
+}
+
+// --- graph traversal ---
+
+// TraverseFromEntities expands seed entity IDs up to depth hops using
+// Apache AGE Cypher on the loar_graph property graph. The Cypher MATCH
+// traversal is more expressive than a recursive CTE and handles arbitrary
+// relationship types natively.
+//
+// Returned entities are the expanded neighbours (depth > 0). The full entity
+// records are fetched from the relational store after the graph query so
+// callers get rich domain objects, not raw agtype values.
+func (db *DB) TraverseFromEntities(ctx context.Context, projectID string, entityIDs []string, depth int) ([]domain.Entity, []domain.Relationship, error) {
+	if len(entityIDs) == 0 || depth == 0 {
+		return nil, nil, nil
+	}
+
+	// Build the agtype params. seed_ids is a Cypher list of quoted strings.
+	quoted := make([]string, len(entityIDs))
+	for i, id := range entityIDs {
+		quoted[i] = fmt.Sprintf("%q", id)
+	}
+	params := fmt.Sprintf(`{"project_id": %q, "seed_ids": [%s]}`,
+		projectID, strings.Join(quoted, ", "))
+
+	// Use UNWIND to iterate seed IDs and perform a variable-length path match.
+	// depth is an integer Go variable — fmt.Sprintf is safe here.
+	sql := fmt.Sprintf(`
+		SELECT * FROM cypher('loar_graph', $$
+		    UNWIND $seed_ids AS seed_id
+		    MATCH (seed:Entity {id: seed_id, project_id: $project_id})-[*1..%d]-(n:Entity {project_id: $project_id})
+		    RETURN DISTINCT n.id
+		$$, $1::agtype) AS (entity_id agtype)`, depth)
+
+	rows, err := db.pool.Query(ctx, sql, params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("traverse AGE: %w", err)
+	}
+	defer rows.Close()
+
+	var expandedIDs []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, nil, err
+		}
+		// AGE returns string properties as JSON strings: "abc" — strip the quotes.
+		id := strings.Trim(raw, `"`)
+		if id != "" && id != "null" {
+			expandedIDs = append(expandedIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	if len(expandedIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	// Fetch full entity records from the relational store.
+	entityRows, err := db.pool.Query(ctx,
+		`SELECT id, type, canonical_name, aliases, metadata
+		 FROM entities
+		 WHERE project_id = $1 AND id = ANY($2::text[])`,
+		projectID, expandedIDs,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("traverse fetch entities: %w", err)
+	}
+	defer entityRows.Close()
+
+	var expanded []domain.Entity
+	for entityRows.Next() {
+		e, err := scanEntityRow(entityRows)
+		if err != nil {
+			return nil, nil, err
+		}
+		expanded = append(expanded, *e)
+	}
+	if err := entityRows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	// Collect all relationships in the induced subgraph (seeds ∪ expanded).
+	allIDs := append(entityIDs, expandedIDs...)
+	relRows, err := db.pool.Query(ctx,
+		`SELECT id, source_id, target_id, relationship_type, confidence
+		 FROM relationships
+		 WHERE project_id = $1
+		   AND source_id = ANY($2::text[])
+		   AND target_id = ANY($2::text[])`,
+		projectID, allIDs,
+	)
+	if err != nil {
+		return expanded, nil, fmt.Errorf("traverse fetch relationships: %w", err)
+	}
+	defer relRows.Close()
+
+	var rels []domain.Relationship
+	for relRows.Next() {
+		var r domain.Relationship
+		if err := relRows.Scan(&r.ID, &r.SourceID, &r.TargetID, &r.Type, &r.Confidence); err != nil {
+			return expanded, nil, err
+		}
+		rels = append(rels, r)
+	}
+	return expanded, rels, relRows.Err()
+}
+
+// confidenceDecay computes recency-weighted confidence for a set of observations.
+// Shared by the Postgres learn path; mirrors retrieval/engine.go recencyScore.
+func confidenceDecay(obs []*domain.Observation, now time.Time) float64 {
+	if len(obs) == 0 {
+		return 0.5
+	}
+	total := 0.0
+	for _, o := range obs {
+		ref := o.Temporal.OccurredAt
+		if ref == nil {
+			ref = o.Temporal.ObservedAt
+		}
+		if ref == nil {
+			total += 0.5
+			continue
+		}
+		days := now.Sub(*ref).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		total += 0.5 + 0.5*math.Exp(-days/365)
+	}
+	return total / float64(len(obs))
 }

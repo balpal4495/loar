@@ -73,8 +73,9 @@ func buildInput(pkg *domain.ContextPackage, obs []domain.Observation) ([]byte, e
 		SourceID   string  `json:"source_id,omitempty"`
 	}
 	type entityJSON struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+		Name          string `json:"name"`
+		CanonicalName string `json:"canonical_name"`
+		Type          string `json:"type"`
 	}
 	type contradictionJSON struct {
 		Summary string `json:"summary"`
@@ -109,7 +110,7 @@ func buildInput(pkg *domain.ContextPackage, obs []domain.Observation) ([]byte, e
 
 	entOut := make([]entityJSON, 0, len(pkg.Entities))
 	for _, e := range pkg.Entities {
-		entOut = append(entOut, entityJSON{Name: e.CanonicalName, Type: e.Type})
+		entOut = append(entOut, entityJSON{Name: e.CanonicalName, CanonicalName: e.CanonicalName, Type: e.Type})
 	}
 
 	conOut := make([]contradictionJSON, 0, len(pkg.Contradictions))

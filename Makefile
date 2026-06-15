@@ -17,7 +17,7 @@ LDFLAGS := -s -w \
 	-X main.commit=$(COMMIT) \
 	-X main.date=$(DATE)
 
-.PHONY: all build install uninstall reinstall test clean fmt vet db-up db-down
+.PHONY: all build install uninstall reinstall test test-local clean fmt vet db-up db-down
 
 ## build: Compile the loar binary into ./loar
 build:

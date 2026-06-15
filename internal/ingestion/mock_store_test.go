@@ -65,5 +65,22 @@ func (m *mockStore) EntitiesForObservation(_ context.Context, _ string) ([]*doma
 func (m *mockStore) ObservationsForEntity(_ context.Context, _ string) ([]*domain.Observation, error) {
 	return nil, nil
 }
+
+// EntityConfidenceStore stubs.
+func (m *mockStore) WriteEntityConfidence(_ context.Context, _ *domain.EntityConfidence) error {
+	return nil
+}
+func (m *mockStore) LatestEntityConfidence(_ context.Context, _, _ string) (*domain.EntityConfidence, error) {
+	return nil, nil
+}
+func (m *mockStore) EntityConfidenceHistory(_ context.Context, _, _ string, _ int) ([]*domain.EntityConfidence, error) {
+	return nil, nil
+}
+
+// GraphTraversalStore stub.
+func (m *mockStore) TraverseFromEntities(_ context.Context, _ string, _ []string, _ int) ([]domain.Entity, []domain.Relationship, error) {
+	return nil, nil, nil
+}
+
 func (m *mockStore) Migrate(_ context.Context) error { return nil }
 func (m *mockStore) Close()                          {}

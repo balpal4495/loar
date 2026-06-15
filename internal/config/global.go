@@ -11,8 +11,8 @@ import (
 
 const globalFileName = "config.toml"
 
-// GlobalConfig holds machine-level Postgres connection details written by
-// `loar setup`. It is stored at ~/.config/loar/config.toml.
+// GlobalConfig holds machine-level connection details written by `loar setup`.
+// It is stored at ~/.config/loar/config.toml.
 type GlobalConfig struct {
 	PostgresHost     string `toml:"postgres_host"`
 	PostgresPort     int    `toml:"postgres_port"`

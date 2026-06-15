@@ -2,11 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"time"
 
-	"github.com/balpal4495/loar/internal/config"
+	"github.com/balpal4495/loar/internal/domain"
 	"github.com/balpal4495/loar/internal/entity"
-	"github.com/balpal4495/loar/internal/store/postgres"
 	"github.com/spf13/cobra"
 )
 
@@ -26,22 +27,11 @@ Example:
   loar learn`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dsn := mustProjectDSN(cmd)
 			ctx := cmd.Context()
 
-			cwd, err := os.Getwd()
+			db, cfg, err := openStore(cmd)
 			if err != nil {
 				return fmt.Errorf("learn: %w", err)
-			}
-
-			cfg, _, err := config.Find(cwd)
-			if err != nil {
-				return fmt.Errorf("learn: %w", err)
-			}
-
-			db, err := postgres.New(ctx, dsn)
-			if err != nil {
-				return fmt.Errorf("learn: connect: %w", err)
 			}
 			defer db.Close()
 
@@ -72,9 +62,71 @@ Example:
 				linked += n
 			}
 
+			// Compute and record entity confidence for every entity in the project.
+			// This is the append-only time-series that lets trend be queried over time.
+			entities, err := db.ListEntities(ctx, proj.ID)
+			if err != nil {
+				return fmt.Errorf("learn: list entities: %w", err)
+			}
+
+			now := time.Now()
+			confidenceRows := 0
+			for _, ent := range entities {
+				obsForEnt, err := db.ObservationsForEntity(ctx, ent.ID)
+				if err != nil || len(obsForEnt) == 0 {
+					continue
+				}
+				score := computeEntityScore(obsForEnt, now)
+				resolved := 0
+				for _, o := range obsForEnt {
+					if o.Temporal.ResolvedAt != nil {
+						resolved++
+					}
+				}
+				ec := &domain.EntityConfidence{
+					EntityID:         ent.ID,
+					ProjectID:        proj.ID,
+					Score:            score,
+					ObservationCount: len(obsForEnt),
+					ResolvedCount:    resolved,
+					ComputedAt:       now,
+				}
+				if err := db.WriteEntityConfidence(ctx, ec); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: entity confidence write failed for %s: %v\n", ent.CanonicalName, err)
+					continue
+				}
+				confidenceRows++
+			}
+
 			fmt.Printf("Done. Extracted and linked %d entity references across %d observations.\n", linked, len(observations))
+			fmt.Printf("Recorded confidence scores for %d entities.\n", confidenceRows)
 			return nil
 		},
 	}
 	return cmd
+}
+
+// computeEntityScore returns the mean recency-weighted confidence for a set of
+// observations. Mirrors the formula in retrieval/engine.go recencyScore.
+func computeEntityScore(obs []*domain.Observation, now time.Time) float64 {
+	if len(obs) == 0 {
+		return 0.5
+	}
+	total := 0.0
+	for _, o := range obs {
+		ref := o.Temporal.OccurredAt
+		if ref == nil {
+			ref = o.Temporal.ObservedAt
+		}
+		if ref == nil {
+			total += 0.5
+			continue
+		}
+		days := now.Sub(*ref).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		total += 0.5 + 0.5*math.Exp(-days/365)
+	}
+	return total / float64(len(obs))
 }

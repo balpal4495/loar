@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "loar": {
+      "type": "stdio",
+      "command": "loar",
+      "args": ["serve"],
+      "description": "Loar knowledge runtime — retrieves structured evidence for a question from the current project's knowledge store."
+    }
+  }
+}

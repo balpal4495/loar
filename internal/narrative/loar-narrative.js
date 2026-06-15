@@ -31,8 +31,8 @@ function plural(n, singular, plur) {
 function render(pkg) {
   const { query, entities, observations, contradictions, date_range } = pkg;
   const lines = [];
-  const entityNames = (entities || []).map(e => e.name);
-  const heading = entityNames.length > 0 ? entityNames.join(', ') : query;
+  const entityNames = (entities || []).map(e => e.canonical_name || e.name).filter(Boolean);
+  const heading = query;
 
   lines.push(heading);
   lines.push('─'.repeat(40));
@@ -44,15 +44,12 @@ function render(pkg) {
     return lines.join('\n');
   }
 
-  // Lead sentence — varies by query, anchored to entity name when resolved.
+  // Lead sentence — always scoped to the query, never to a resolved entity name.
   const n = obs.length;
-  const openers = entityNames.length > 0 ? [
-    `${entityNames[0]} appears in ${plural(n, 'observation', 'observations')} in the knowledge store.`,
-    `The knowledge store holds ${plural(n, 'observation', 'observations')} relating to ${entityNames[0]}.`,
-    `${plural(n, 'observation', 'observations')} found for ${entityNames[0]}.`,
-  ] : [
-    `The knowledge store holds ${plural(n, 'observation', 'observations')} relevant to this query.`,
+  const openers = [
+    `The knowledge store holds ${plural(n, 'observation', 'observations')} for this query.`,
     `${plural(n, 'observation', 'observations')} found for this query.`,
+    `${plural(n, 'observation', 'observations')} retrieved.`,
   ];
   lines.push(pick(openers, query));
   lines.push('');

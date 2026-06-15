@@ -17,14 +17,14 @@ func NewSetupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "Configure Loar for first use",
-		Long: `Detects a local PostgreSQL instance, creates the Loar database user,
-and writes the global configuration to ~/.config/loar/config.toml.
+		Long: `Detects a local PostgreSQL instance (with Apache AGE extension), creates
+the Loar database user, and writes the global configuration to
+~/.config/loar/config.toml.
 
 Run once per machine before using any other loar command.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
 
-			// Check whether setup has already been run.
 			exists, err := config.GlobalConfigExists()
 			if err != nil {
 				return err
@@ -39,15 +39,12 @@ Run once per machine before using any other loar command.`,
 			fmt.Fprintln(w, "Loar Setup")
 			fmt.Fprintln(w, "──────────────────────────────────────────────────────")
 
-			// Detect Postgres.
 			fmt.Fprint(w, "Checking for PostgreSQL on localhost:5432... ")
 			if setup.DetectPostgres() != setup.PostgresRunning {
 				fmt.Fprintln(w, "✗ not found")
 				fmt.Fprintln(w)
-				fmt.Fprintln(w, "PostgreSQL is not running. To install and start it:")
+				fmt.Fprintln(w, "PostgreSQL is not running.")
 				fmt.Fprintln(w, setup.InstallInstructions())
-				fmt.Fprintln(w)
-				fmt.Fprintln(w, "Re-run `loar setup` once PostgreSQL is running.")
 				return fmt.Errorf("setup: PostgreSQL not available on localhost:5432")
 			}
 			fmt.Fprintln(w, "✓")
@@ -55,7 +52,6 @@ Run once per machine before using any other loar command.`,
 			defaults := config.DefaultGlobalConfig()
 			scanner := bufio.NewReader(cmd.InOrStdin())
 
-			// Prompt for admin credentials (used only to create the loar user).
 			fmt.Fprintf(w, "\nPostgres admin username [postgres]: ")
 			adminUser := readLine(scanner)
 			if adminUser == "" {
@@ -73,21 +69,18 @@ Run once per machine before using any other loar command.`,
 				adminUser, adminPassword, defaults.PostgresHost, defaults.PostgresPort,
 			)
 
-			// Prompt for the loar service user.
 			fmt.Fprintf(w, "Loar database user     [%s]: ", defaults.PostgresUser)
 			loarUser := readLine(scanner)
 			if loarUser == "" {
 				loarUser = defaults.PostgresUser
 			}
 
-			// Prompt for loar password.
 			fmt.Fprintf(w, "Loar database password [%s]: ", defaults.PostgresPassword)
 			loarPassword := readLine(scanner)
 			if loarPassword == "" {
 				loarPassword = defaults.PostgresPassword
 			}
 
-			// Create the loar user.
 			fmt.Fprintf(w, "\nCreating Postgres user %q... ", loarUser)
 			ctx := cmd.Context()
 			if err := postgres.EnsureUser(ctx, adminDSN, loarUser, loarPassword); err != nil {
@@ -96,7 +89,6 @@ Run once per machine before using any other loar command.`,
 			}
 			fmt.Fprintln(w, "✓")
 
-			// Write global config.
 			cfg := config.GlobalConfig{
 				PostgresHost:     defaults.PostgresHost,
 				PostgresPort:     defaults.PostgresPort,
@@ -126,3 +118,4 @@ func readLine(r *bufio.Reader) string {
 	line, _ := r.ReadString('\n')
 	return strings.TrimSpace(line)
 }
+

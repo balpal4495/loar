@@ -5,9 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/ingestion"
-	"github.com/balpal4495/loar/internal/store/postgres"
 	"github.com/spf13/cobra"
 )
 
@@ -34,22 +32,11 @@ Examples:
   loar ingest ./committed --incremental   # skip already-ingested records`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dsn := mustProjectDSN(cmd)
 			ctx := cmd.Context()
 
-			cwd, err := os.Getwd()
+			db, cfg, err := openStore(cmd)
 			if err != nil {
 				return fmt.Errorf("ingest: %w", err)
-			}
-
-			cfg, _, err := config.Find(cwd)
-			if err != nil {
-				return fmt.Errorf("ingest: %w", err)
-			}
-
-			db, err := postgres.New(ctx, dsn)
-			if err != nil {
-				return fmt.Errorf("ingest: connect: %w", err)
 			}
 			defer db.Close()
 
@@ -119,3 +106,4 @@ Examples:
 func isURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
+

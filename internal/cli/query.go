@@ -4,16 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/balpal4495/loar/internal/config"
 	"github.com/balpal4495/loar/internal/domain"
 	"github.com/balpal4495/loar/internal/narrative"
 	"github.com/balpal4495/loar/internal/retrieval"
-	"github.com/balpal4495/loar/internal/store/postgres"
 	"github.com/spf13/cobra"
 )
 
@@ -106,16 +103,8 @@ func runExplain(cmd *cobra.Command, args []string) error {
 func printNarrative(cmd *cobra.Command, pkg *domain.ContextPackage) {
 	w := cmd.OutOrStdout()
 
-	// Heading.
-	if len(pkg.Entities) > 0 {
-		names := make([]string, 0, len(pkg.Entities))
-		for _, e := range pkg.Entities {
-			names = append(names, e.CanonicalName)
-		}
-		fmt.Fprintf(w, "%s\n%s\n\n", strings.Join(names, ", "), strings.Repeat("─", 40))
-	} else {
-		fmt.Fprintf(w, "%s\n%s\n\n", pkg.Query, strings.Repeat("─", 40))
-	}
+	// Heading — always use the query text, not the entity list.
+	fmt.Fprintf(w, "%s\n%s\n\n", pkg.Query, strings.Repeat("─", 40))
 
 	if len(pkg.Observations) == 0 {
 		fmt.Fprintln(w, "No evidence found for this query.")
@@ -372,8 +361,15 @@ func emitJSON(cmd *cobra.Command, pkg *domain.ContextPackage) error {
 		SourceID   string  `json:"source_id,omitempty"`
 	}
 	type entityJSON struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+		ID            string `json:"id"`
+		Type          string `json:"type"`
+		CanonicalName string `json:"canonical_name"`
+	}
+	type relationshipJSON struct {
+		SourceID string  `json:"source_id"`
+		TargetID string  `json:"target_id"`
+		Type     string  `json:"type"`
+		Confidence float64 `json:"confidence"`
 	}
 	type contradictionJSON struct {
 		Summary string `json:"summary"`
@@ -383,12 +379,14 @@ func emitJSON(cmd *cobra.Command, pkg *domain.ContextPackage) error {
 		Latest   string `json:"latest,omitempty"`
 	}
 	type output struct {
-		Query          string              `json:"query"`
-		Entities       []entityJSON        `json:"entities"`
-		Observations   []obsJSON           `json:"observations"`
+		Query          string             `json:"query"`
+		Summary        string             `json:"summary,omitempty"`
+		Entities       []entityJSON       `json:"entities"`
+		Observations   []obsJSON          `json:"observations"`
+		Relationships  []relationshipJSON `json:"relationships,omitempty"`
 		Contradictions []contradictionJSON `json:"contradictions,omitempty"`
-		Confidence     float64             `json:"confidence"`
-		DateRange      dateRangeJSON       `json:"date_range,omitempty"`
+		Confidence     float64            `json:"confidence"`
+		DateRange      dateRangeJSON      `json:"date_range,omitempty"`
 	}
 
 	obs := make([]domain.Observation, len(pkg.Observations))
@@ -411,7 +409,17 @@ func emitJSON(cmd *cobra.Command, pkg *domain.ContextPackage) error {
 
 	entOut := make([]entityJSON, 0, len(pkg.Entities))
 	for _, e := range pkg.Entities {
-		entOut = append(entOut, entityJSON{Name: e.CanonicalName, Type: e.Type})
+		entOut = append(entOut, entityJSON{ID: e.ID, Type: e.Type, CanonicalName: e.CanonicalName})
+	}
+
+	relOut := make([]relationshipJSON, 0, len(pkg.Relationships))
+	for _, r := range pkg.Relationships {
+		relOut = append(relOut, relationshipJSON{
+			SourceID:   r.SourceID,
+			TargetID:   r.TargetID,
+			Type:       r.Type,
+			Confidence: r.Confidence,
+		})
 	}
 
 	conOut := make([]contradictionJSON, 0, len(pkg.Contradictions))
@@ -423,8 +431,10 @@ func emitJSON(cmd *cobra.Command, pkg *domain.ContextPackage) error {
 
 	out := output{
 		Query:          pkg.Query,
+		Summary:        pkg.Summary,
 		Entities:       entOut,
 		Observations:   obsOut,
+		Relationships:  relOut,
 		Contradictions: conOut,
 		Confidence:     pkg.Confidence,
 		DateRange:      dateRangeJSON{Earliest: earliestDate, Latest: latestDate},
@@ -508,22 +518,11 @@ func firstSentence(s string, maxRunes int) string {
 // retrieve runs the full retrieval pipeline and returns the ContextPackage.
 func retrieve(cmd *cobra.Command, args []string) (*domain.ContextPackage, error) {
 	question := strings.Join(args, " ")
-	dsn := mustProjectDSN(cmd)
 	ctx := cmd.Context()
 
-	cwd, err := os.Getwd()
+	db, cfg, err := openStore(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
-	}
-
-	cfg, _, err := config.Find(cwd)
-	if err != nil {
-		return nil, fmt.Errorf("query: %w", err)
-	}
-
-	db, err := postgres.New(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("query: connect: %w", err)
 	}
 	defer db.Close()
 

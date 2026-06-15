@@ -26,7 +26,6 @@ func NewProjectCmd() *cobra.Command {
 }
 
 // newProjectUseCmd returns `loar project use [name]`.
-// If name is omitted, the current directory name is used (Option C).
 func newProjectUseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "use [name]",
@@ -35,8 +34,7 @@ func newProjectUseCmd() *cobra.Command {
 
 If no name is given, the current directory name is used.
 
-A dedicated Postgres database (loar-<name>) is created if it does not already
-exist, and .loar/project.toml is written with the full connection string.
+Creates a dedicated loar-<name> Postgres database and writes .loar/project.toml.
 
 Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 		Args: cobra.MaximumNArgs(1),
@@ -46,7 +44,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 				return fmt.Errorf("project use: %w", err)
 			}
 
-			// Option C: default to directory name when no arg is given.
 			name := filepath.Base(cwd)
 			if len(args) == 1 {
 				name = args[0]
@@ -58,8 +55,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 			}
 
 			ctx := cmd.Context()
-
-			// Create the project database (loar-<name>) if it does not exist.
 			dbName := "loar-" + name
 			fmt.Fprintf(cmd.OutOrStdout(), "Creating database %q... ", dbName)
 			if err := postgres.CreateDatabase(ctx, gcfg.AdminDSN(), dbName, gcfg.PostgresUser); err != nil {
@@ -68,7 +63,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓")
 
-			// Connect to the project database and run migrations.
 			projectDSN := gcfg.ProjectDSN(name)
 			db, err := postgres.New(ctx, projectDSN)
 			if err != nil {
@@ -80,7 +74,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 				return fmt.Errorf("project use: migrate: %w", err)
 			}
 
-			// Ensure the project record exists inside the project database.
 			proj, err := db.GetProjectByName(ctx, name)
 			if err != nil {
 				proj = &domain.Project{Name: name}
@@ -90,7 +83,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 			}
 			_ = proj
 
-			// Write .loar/project.toml with the project name and DSN.
 			if err := config.Write(cwd, &config.ProjectConfig{
 				Project:     name,
 				DatabaseURL: projectDSN,
@@ -106,7 +98,6 @@ Requires ~/.config/loar/config.toml — run ` + "`loar setup`" + ` first.`,
 }
 
 // newProjectCleanCmd returns `loar project clean`.
-// Truncates all observations, entities, and entity links without dropping the database.
 func newProjectCleanCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
@@ -115,23 +106,16 @@ func newProjectCleanCmd() *cobra.Command {
 		Long: `Deletes all observations, entities, and entity links from the current project
 database. The database and schema are preserved; only the data is removed.
 
-Useful when you want to re-ingest from scratch without fully recreating the project.
-
 Use --force to skip the confirmation prompt.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dsn := mustProjectDSN(cmd)
 			ctx := cmd.Context()
 
-			cwd, err := os.Getwd()
+			db, cfg, err := openStore(cmd)
 			if err != nil {
 				return fmt.Errorf("project clean: %w", err)
 			}
-
-			cfg, _, err := config.Find(cwd)
-			if err != nil {
-				return fmt.Errorf("project clean: %w", err)
-			}
+			defer db.Close()
 
 			if !force {
 				fmt.Fprintf(cmd.OutOrStdout(),
@@ -145,13 +129,17 @@ Use --force to skip the confirmation prompt.`,
 				}
 			}
 
-			db, err := postgres.New(ctx, dsn)
+			// CleanProject is on the concrete postgres.DB type.
+			dsn := cfg.DatabaseURL
+			if envDSN := os.Getenv("LOAR_DATABASE_URL"); envDSN != "" {
+				dsn = envDSN
+			}
+			pgDB, err := postgres.New(ctx, dsn)
 			if err != nil {
 				return fmt.Errorf("project clean: connect: %w", err)
 			}
-			defer db.Close()
-
-			if err := db.CleanProject(ctx); err != nil {
+			defer pgDB.Close()
+			if err := pgDB.CleanProject(ctx); err != nil {
 				return fmt.Errorf("project clean: %w", err)
 			}
 
@@ -162,7 +150,9 @@ Use --force to skip the confirmation prompt.`,
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 	return cmd
 }
-// Lists all loar-* databases on the configured Postgres server.
+
+// newProjectListCmd lists all loar-* databases (Postgres mode) or prints a
+// notice in local mode.
 func newProjectListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
@@ -191,14 +181,12 @@ func newProjectListCmd() *cobra.Command {
 	}
 }
 
-// newProjectDeleteCmd returns `loar project delete <name>`.
-// Drops the loar-<name> database and removes .loar/project.toml.
+// newProjectDeleteCmd drops the loar-<name> database (Postgres only).
 func newProjectDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name>",
 		Short: "Delete a project and its database",
-		Long: `Drops the loar-<name> Postgres database and removes .loar/project.toml
-from the current directory (if it references this project).
+		Long: `Drops the loar-<name> Postgres database and removes .loar/project.toml.
 
 This is irreversible.`,
 		Args: cobra.ExactArgs(1),
@@ -220,13 +208,11 @@ This is irreversible.`,
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓")
 
-			// Remove .loar/project.toml if it references this project.
 			cwd, err := os.Getwd()
 			if err == nil {
 				tomlPath := filepath.Join(cwd, ".loar", "project.toml")
 				if cfg, err := config.Load(cwd); err == nil && cfg.Project == name {
 					_ = os.Remove(tomlPath)
-					// Remove .loar/ dir if now empty.
 					_ = os.Remove(filepath.Join(cwd, ".loar"))
 					fmt.Fprintln(cmd.OutOrStdout(), "Removed .loar/project.toml")
 				}
@@ -237,3 +223,6 @@ This is irreversible.`,
 		},
 	}
 }
+
+
+// NewProjectCmd returns the `loar project` command group.
